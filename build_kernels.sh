@@ -1,28 +1,47 @@
 #!/bin/bash
 
-if [ ! -d /home/runner/work ]; then NTHREADS=$(nproc); else NTHREADS=$(($(nproc)*4)); fi
-
-if [ -z "$1" ]; then
-kernels=$(ls -d ./kernels/* | sed 's#./kernels/##g')
-else
-kernels="$1"
+# Determine the number of threads to use for building
+if [ ! -d /home/runner/work ]; then 
+    NTHREADS=$(nproc) 
+else 
+    NTHREADS=$(($(nproc) * 4)) 
 fi
 
+# List of kernels to build
+if [ -z "$1" ]; then
+    kernels=$(ls -d ./kernels/* | grep -E 'rocketlake|tpm2.0' | sed 's#./kernels/##g')
+else
+    kernels="$1"
+fi
+
+# Loop through each kernel
 for kernel in $kernels; do
-	echo "Building kernel $kernel"
-	KCONFIG_NOTIMESTAMP=1 KBUILD_BUILD_TIMESTAMP='' KBUILD_BUILD_USER=chronos KBUILD_BUILD_HOST=localhost make -C "./kernels/$kernel" -j"$NTHREADS" O=out || { echo "Kernel build failed"; exit 1; }
-	rm -f "./kernels/$kernel/out/source"
-	if [ -f /persist/keys/brunch.priv ] && [ -f /persist/keys/brunch.pem ]; then
-		echo "Signing kernel $kernel"
-		mv "./kernels/$kernel/out/arch/x86/boot/bzImage" "./kernels/$kernel/out/arch/x86/boot/bzImage.unsigned" || { echo "Kernel signing failed"; exit 1; }
-		sbsign --key /persist/keys/brunch.priv --cert /persist/keys/brunch.pem "./kernels/$kernel/out/arch/x86/boot/bzImage.unsigned" --output "./kernels/$kernel/out/arch/x86/boot/bzImage" || { echo "Kernel signing failed"; exit 1; }
-	fi
-	echo "Including kernel $kernel headers"
-	srctree="./kernels/$kernel"
-	objtree="./kernels/$kernel/out"
-	SRCARCH="x86"
-	KCONFIG_CONFIG="$objtree/.config"
-	destdir="$srctree/headers"
+    echo "Building kernel $kernel"
+
+    # Set specific build flags for Intel 11th Gen Rocket Lake
+    export KCFLAGS="-march=rocketlake"
+    export KCXXFLAGS="$KCFLAGS"
+
+    # Kernel build command with Rocket Lake optimizations
+    KCONFIG_NOTIMESTAMP=1 KBUILD_BUILD_TIMESTAMP='' KBUILD_BUILD_USER=chronos KBUILD_BUILD_HOST=localhost \
+    make -C "./kernels/$kernel" -j"$NTHREADS" O=out KCFLAGS="$KCFLAGS" || { echo "Kernel build failed"; exit 1; }
+
+    rm -f "./kernels/$kernel/out/source"
+
+    # Kernel signing process
+    if [ -f /persist/keys/brunch.priv ] && [ -f /persist/keys/brunch.pem ]; then
+        echo "Signing kernel $kernel"
+        mv "./kernels/$kernel/out/arch/x86/boot/bzImage" "./kernels/$kernel/out/arch/x86/boot/bzImage.unsigned" || { echo "Kernel signing failed"; exit 1; }
+        sbsign --key /persist/keys/brunch.priv --cert /persist/keys/brunch.pem "./kernels/$kernel/out/arch/x86/boot/bzImage.unsigned" --output "./kernels/$kernel/out/arch/x86/boot/bzImage" || { echo "Kernel signing failed"; exit 1; }
+    fi
+
+    # Including kernel headers
+    echo "Including kernel $kernel headers"
+    srctree="./kernels/$kernel"
+    objtree="./kernels/$kernel/out"
+    SRCARCH="x86"
+    KCONFIG_CONFIG="$objtree/.config"
+    destdir="$srctree/headers"
 	(cd $srctree; find . -name Makefile\* -o -name Kconfig\* -o -name \*.pl) > "$objtree/hdrsrcfiles"
 	(cd $srctree; find arch/*/include include scripts -type f -o -type l) >> "$objtree/hdrsrcfiles"
 	(cd $srctree; find arch/$SRCARCH -name module.lds -o -name Kbuild.platforms -o -name Platform) >> "$objtree/hdrsrcfiles"
