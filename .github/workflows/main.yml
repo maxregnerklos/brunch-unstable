@@ -1,60 +1,66 @@
-name: Build Brunch using GitHub Actions
-
+name: Build Brunch using Github Actions
 on:
   push:
     branches:
       - 'continuous-integration'
     paths-ignore:
       - 'README.md'
-
 concurrency:
   group: environment-${{ github.ref }}
   cancel-in-progress: true
-
 jobs:
-  prepare-kernel:
-    name: Prepare Kernel
+  prepare-kernels:
+    name: Prepare Kernels
     runs-on: ubuntu-22.04
+    outputs:
+      matrix: ${{ steps.kernels.outputs.matrix }}
     steps:
       - name: Install dependencies
         run: |
           yes | DEBIAN_FRONTEND=noninteractive sudo apt update
+          #yes | DEBIAN_FRONTEND=noninteractive sudo apt dist-upgrade
           yes | DEBIAN_FRONTEND=noninteractive sudo apt install gcc-12 g++-12 git fakeroot build-essential ncurses-dev xz-utils libssl-dev bc flex libelf-dev bison sbsigntool
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 110 --slave /usr/bin/g++ g++ /usr/bin/g++-12 --slave /usr/bin/gcov gcov /usr/bin/gcov-12
       - name: Checkout Brunch source code
         uses: actions/checkout@v4
-      - name: Download kernel and apply patches
+      - name: Download kernels and apply patches
         run: ./prepare_kernels.sh
-      - name: Compress kernel source files
-        run: tar zcf /tmp/kernel-source.tar.gz kernels
-      - name: Upload kernel source
+      - name: Define kernels matrix
+        id: kernels
+        run: echo "matrix=$(echo [\"$(ls -d ./kernels/*  | cut -f3 -d'/' | sed -Ez '$ s/\n+$//' | sed -z 's#\n#","#g')\"])" >> $GITHUB_OUTPUT
+      - name: Compress kernels source files
+        run: tar zcf /tmp/kernels-source.tar.gz kernels
+      - name: Upload kernels source
         uses: actions/upload-artifact@v4
         with:
-          name: kernel-source
-          path: /tmp/kernel-source.tar.gz
+          name: kernels-source
+          path: /tmp/kernels-source.tar.gz
           if-no-files-found: error
-
-  build-kernel:
-    name: Build Kernel
-    needs: prepare-kernel
+  build-kernels:
+    name: Build Kernels
+    needs: prepare-kernels
     runs-on: ubuntu-22.04
+    strategy:
+        matrix:
+            kernel: ${{ fromJson(needs.prepare-kernels.outputs.matrix) }}
     steps:
       - name: Install dependencies
         run: |
           yes | DEBIAN_FRONTEND=noninteractive sudo apt update
+          #yes | DEBIAN_FRONTEND=noninteractive sudo apt dist-upgrade
           yes | DEBIAN_FRONTEND=noninteractive sudo apt install gcc-12 g++-12 git fakeroot build-essential ncurses-dev xz-utils libssl-dev bc flex libelf-dev bison sbsigntool
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 110 --slave /usr/bin/g++ g++ /usr/bin/g++-12 --slave /usr/bin/gcov gcov /usr/bin/gcov-12
       - name: Checkout Brunch source code
         uses: actions/checkout@v4
-      - name: Download kernel source
+      - name: Download kernels source
         uses: actions/download-artifact@v4
         with:
-          name: kernel-source
+          name: kernels-source
           path: /tmp
-      - name: Extract kernel source files
+      - name: Extract kernels source files
         run: |
-          tar -zxf /tmp/kernel-source.tar.gz
-          rm -f /tmp/kernel-source.tar.gz
+          tar -zxf /tmp/kernels-source.tar.gz
+          rm -f /tmp/kernels-source.tar.gz
       - name: Install Secure Boot certificate
         env:
           BRUNCH_PRIV: ${{ secrets.BRUNCH_PRIV }}
@@ -64,22 +70,21 @@ jobs:
           mkdir /persist/keys
           echo "$BRUNCH_PRIV" | base64 -d > /persist/keys/brunch.priv
           echo "$BRUNCH_PEM" | base64 -d > /persist/keys/brunch.pem
-      - name: Build kernel
-        run: ./build_kernels.sh kernel_name  # Replace 'kernel_name' with the actual kernel name for Coffee Lake 7th Gen
+      - name: Build kernels
+        run: ./build_kernels.sh ${{ matrix.kernel }}
       - name: Clear keys
         run: rm -r /persist/keys
       - name: Compress built kernel
-        run: tar zcf /tmp/built-kernel.tar.gz kernels/kernel_name  # Replace 'kernel_name' with the actual kernel name
-      - name: Upload built kernel
+        run: tar zcf /tmp/built-kernel-${{ matrix.kernel }}.tar.gz kernels/${{ matrix.kernel }}
+      - name: Upload kernels source
         uses: actions/upload-artifact@v4
         with:
-          name: built-kernel
-          path: /tmp/built-kernel.tar.gz
+          name: built-kernel-${{ matrix.kernel }}
+          path: /tmp/built-kernel-${{ matrix.kernel }}.tar.gz
           if-no-files-found: error
-
   build-brunch:
     name: Build Brunch
-    needs: build-kernel
+    needs: build-kernels
     runs-on: ubuntu-22.04
     steps:
       - name: Free Disk Space (Ubuntu)
@@ -93,6 +98,7 @@ jobs:
       - name: Install dependencies
         run: |
           yes | DEBIAN_FRONTEND=noninteractive sudo apt update
+          #yes | DEBIAN_FRONTEND=noninteractive sudo apt dist-upgrade
           yes | DEBIAN_FRONTEND=noninteractive sudo apt install gcc-12 g++-12 git fakeroot build-essential ncurses-dev xz-utils libssl-dev bc flex libelf-dev bison sbsigntool python3-protobuf rdfind zstd
           sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-12 110 --slave /usr/bin/g++ g++ /usr/bin/g++-12 --slave /usr/bin/gcov gcov /usr/bin/gcov-12
           pip3 install --upgrade google-api-python-client
@@ -102,24 +108,26 @@ jobs:
           sudo apt clean
       - name: Checkout Brunch source code
         uses: actions/checkout@v4
-      - name: Download built kernel
+      - name: Download built kernels
         uses: actions/download-artifact@v4
         with:
-          name: built-kernel
           path: /tmp
-      - name: Extract built kernel
+      - name: Copy built kernels
         run: |
-          tar zxf /tmp/built-kernel.tar.gz
-          rm -f /tmp/built-kernel.tar.gz
+          for file in /tmp/built-kernel-*/built-kernel-*.tar.gz
+          do
+            tar zxf $file
+            rm -f $file
+          done
+          rm -r /tmp/kernels-source/kernels-source.tar.gz
       - name: Build brunch
         run: sudo bash build_brunch.sh
-      - name: Upload brunch build
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
           name: brunch-build
           path: out/brunch_r*.tar.gz
           if-no-files-found: error
-
   release:
     name: Make a Brunch release
     permissions:
@@ -169,4 +177,4 @@ jobs:
           tag: "${{ env.RELEASE_TAG }}"
           name: "${{ env.RELEASE_NAME }}"
           commit: "${{ github.ref_name }}"
-          body: "${{ github.event.head_commit.message }}\n\nrelease_sha256sum=${{ env.RELEASE_SHA256 }}"
+          body: "${{ github.event.head_commit.message }}\n\nrelease_sha256sum=${{ env.RELEASE_SHA256 }}\n"
